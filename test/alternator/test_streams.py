@@ -484,12 +484,25 @@ def list_shards(dynamodbstreams, arn):
     assert len(response['Shards']) <= limit
     shards = [x['ShardId'] for x in response['Shards']]
     while 'LastEvaluatedShardId' in response:
+        # 7409 kinesis ignores LastEvaluatedShardId and just looks at last shard
+        assert shards[-1] == response['LastEvaluatedShardId']
         response = dynamodbstreams.describe_stream(StreamArn=arn, Limit=limit,
             ExclusiveStartShardId=response['LastEvaluatedShardId'])['StreamDescription']
         assert len(response['Shards']) <= limit
         shards.extend([x['ShardId'] for x in response['Shards']])
+
     print('Number of shards in stream: {}'.format(len(shards)))
     assert len(set(shards)) == len(shards)
+    # 7409 - kinesis required shards to be in lexical order.
+    # verify.
+    assert shards == sorted(shards)
+
+    # special test: ensure we get nothing more if we ask for starting at the last
+    # of the last
+    response = dynamodbstreams.describe_stream(StreamArn=arn,
+        ExclusiveStartShardId=shards[-1])['StreamDescription']
+    assert len(response['Shards']) == 0
+
     return shards
 
 # Utility function for getting shard iterators starting at "LATEST" for
@@ -1015,6 +1028,11 @@ def test_streams_after_sequence_number(test_table_ss_keys_only, dynamodbstreams)
                 assert response['Records'][1]['dynamodb']['Keys'] == {'p': {'S': p}, 'c': {'S': c}}
                 sequence_number_1 = response['Records'][0]['dynamodb']['SequenceNumber']
                 sequence_number_2 = response['Records'][1]['dynamodb']['SequenceNumber']
+
+                # #7424 - AWS sdk assumes sequence numbers can be compared
+                # as bigints, and are monotonically growing.
+                assert int(sequence_number_1) < int(sequence_number_2)
+
                 # If we use the SequenceNumber of the first event to create an
                 # AFTER_SEQUENCE_NUMBER iterator, we can read the second event
                 # (only) again. We don't need a loop and a timeout, because this
